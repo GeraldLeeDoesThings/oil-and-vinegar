@@ -9,3 +9,7 @@ license = "GPL-3.0-only"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+getrandom = "0.2.10"
+ndarray = "0.15.6"
+num-traits = "0.2.16"
+sha3 = "0.10.8"

@@ -1,7 +1,11 @@
+use num_traits::Zero;
 use std::ops::{Add, Mul};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-struct FiniteFieldU8<const M: u16>;
+pub struct FiniteFieldU8<const M: u16>;
+
+pub type F256Point = FiniteFieldValueU8<0b100011011>;
+pub const F256: FiniteFieldU8<0b100011011> = FiniteFieldU8::<0b100011011>;
 
 impl<const M: u16> FiniteFieldU8<{ M }> {
     pub fn make_point(self, value: u8) -> FiniteFieldValueU8<M> {
@@ -10,10 +14,21 @@ impl<const M: u16> FiniteFieldU8<{ M }> {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
-struct FiniteFieldValueU8<const F: u16> {
+pub struct FiniteFieldValueU8<const F: u16> {
     value: u8,
 }
 
+impl<const M: u16> Zero for FiniteFieldValueU8<{ M }> {
+    fn zero() -> Self {
+        FiniteFieldValueU8 { value: 0 }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.value == 0
+    }
+}
+
+#[allow(clippy::suspicious_arithmetic_impl)]
 impl<const M: u16> Add for FiniteFieldValueU8<{ M }> {
     type Output = Self;
 
