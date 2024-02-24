@@ -1,7 +1,15 @@
-use core::iter::Sum;
+use core::{
+    fmt,
+    iter::{Product, Sum},
+};
 use ndarray::ScalarOperand;
-use num_traits::{Zero, One, Num, NumCast, ToPrimitive, Float};
-use std::{ops::{Add, Mul, Sub, Div, Rem, Neg, AddAssign}, fmt::{UpperHex, LowerHex}, num::{ParseIntError, FpCategory}};
+use num_traits::{FromPrimitive, Num, NumCast, One, Signed, ToPrimitive, Zero};
+use serde::{Deserialize, Serialize, Serializer};
+use std::{
+    fmt::{Debug, Display, LowerExp, LowerHex, UpperExp, UpperHex},
+    num::ParseIntError,
+    ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Rem, RemAssign, Sub, SubAssign},
+};
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct FiniteFieldU8<const M: u16>;
@@ -15,9 +23,15 @@ impl<const M: u16> FiniteFieldU8<{ M }> {
     }
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, PartialOrd)]
+#[derive(Copy, Clone, PartialEq, PartialOrd, Serialize, Deserialize)]
 pub struct FiniteFieldValueU8<const F: u16> {
     value: u8,
+}
+
+impl<const M: u16> Debug for FiniteFieldValueU8<{ M }> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.serialize_u8(self.value)
+    }
 }
 
 impl<const M: u16> UpperHex for FiniteFieldValueU8<{ M }> {
@@ -95,39 +109,131 @@ impl<const M: u16> Mul for FiniteFieldValueU8<{ M }> {
     }
 }
 
-impl<const M: u16> Div for FiniteFieldValueU8<{ M }> {
-    type Output = Self;
+#[derive(Debug, PartialEq)]
+struct DivResult<T> {
+    quotient: T,
+    remainder: T,
+}
 
-    fn div(self, _rhs: Self) -> Self::Output {
-        panic!("DIV OH NO");
+fn most_sig_one(v: u16) -> Option<u16> {
+    let mut best = 0u16;
+    let mut check = 1u16;
+    let mut shift = 0u16;
+    for check_shift in 0..u16::BITS {
+        if v & check > 0 {
+            best = check;
+            shift = check_shift as u16;
+        }
+        check <<= 1;
+    }
+    if best == 0 {
+        None
+    } else {
+        Some(shift)
     }
 }
 
+fn poly_div(lhs: u16, rhs: u16) -> Result<DivResult<u16>, String> {
+    let mut r: u16 = 0;
+    let rhs_mso = most_sig_one(rhs).ok_or("Division by zero!")?;
+
+    if lhs == 0 && rhs != 0 {
+        return Ok(DivResult {
+            quotient: 0,
+            remainder: 0,
+        });
+    }
+
+    let lhs_mso = most_sig_one(lhs).unwrap();
+
+    if rhs_mso > lhs_mso || rhs > lhs {
+        return Ok(DivResult {
+            quotient: 0,
+            remainder: rhs,
+        });
+    }
+
+    let mut dividend = lhs;
+
+    for shift in (0..=(lhs_mso - rhs_mso)).rev() {
+        let adj = rhs << shift;
+        let mask = 1u16 << (rhs_mso + shift);
+        if dividend & mask > 0 {
+            dividend = dividend ^ adj;
+            r += 1 << shift;
+        }
+    }
+
+    Ok(DivResult {
+        quotient: r,
+        remainder: dividend,
+    })
+}
+
+impl<const M: u16> FiniteFieldValueU8<{ M }> {
+    fn inverse(&self) -> Option<FiniteFieldValueU8<M>> {
+        let mut t = FiniteFieldValueU8::<M>::zero();
+        let mut r = FiniteFieldValueU8::<M>::zero(); // M;
+        let mut new_t = FiniteFieldValueU8::<M>::one(); // 1;
+        let mut new_r = FiniteFieldValueU8::<M> { value: self.value }; // self.value as u16;
+
+        if new_r.value != 0 {
+            let quotient = FiniteFieldValueU8::<M> {
+                value: poly_div(M, new_r.value as u16).ok()?.quotient as u8,
+            };
+            (r, new_r) = (new_r, r - quotient * new_r);
+            (t, new_t) = (new_t, t - quotient * new_t);
+        }
+
+        while new_r.value != 0 {
+            let quotient = FiniteFieldValueU8::<M> {
+                value: poly_div(r.value as u16, new_r.value as u16).ok()?.quotient as u8,
+            };
+            (r, new_r) = (new_r, r - quotient * new_r);
+            (t, new_t) = (new_t, t - quotient * new_t);
+        }
+
+        if r.value > 1 {
+            None
+        } else if r.value == 1 {
+            Some(t)
+        } else {
+            panic!("Division by zero?")
+        }
+    }
+}
+
+impl<const M: u16> Div for FiniteFieldValueU8<{ M }> {
+    type Output = Self;
+
+    fn div(self, rhs: Self) -> Self::Output {
+        self * rhs.inverse().unwrap()
+    }
+}
 
 impl<const M: u16> Rem for FiniteFieldValueU8<{ M }> {
     type Output = Self;
 
-    fn rem(self, _rhs: Self) -> Self::Output {
-        todo!()
+    fn rem(self, rhs: Self) -> Self::Output {
+        if rhs.is_zero() {
+            panic!("Divide by zero!")
+        } else {
+            Self::Output::zero()
+        }
     }
 }
-
 
 impl<const M: u16> Num for FiniteFieldValueU8<{ M }> {
     type FromStrRadixErr = ParseIntError;
 
     fn from_str_radix(str: &str, radix: u32) -> Result<Self, Self::FromStrRadixErr> {
-
         let value = u8::from_str_radix(str, radix)?;
 
         Ok(FiniteFieldValueU8 { value })
-
     }
 }
 
-
 impl<const M: u16> ToPrimitive for FiniteFieldValueU8<{ M }> {
-
     fn to_i64(&self) -> Option<i64> {
         self.value.to_i64()
     }
@@ -137,16 +243,12 @@ impl<const M: u16> ToPrimitive for FiniteFieldValueU8<{ M }> {
     }
 }
 
-
 impl<const M: u16> NumCast for FiniteFieldValueU8<{ M }> {
-
     fn from<T: num_traits::ToPrimitive>(n: T) -> Option<Self> {
         let value = n.to_u8()?;
         Some(FiniteFieldValueU8 { value })
     }
-
 }
-
 
 impl<const M: u16> Neg for FiniteFieldValueU8<{ M }> {
     type Output = Self;
@@ -154,266 +256,38 @@ impl<const M: u16> Neg for FiniteFieldValueU8<{ M }> {
     fn neg(self) -> Self::Output {
         self
     }
-
 }
 
-
-impl<const M: u16> Float for FiniteFieldValueU8<{ M }> {
-    fn nan() -> Self {
-        unimplemented!()
+impl<const M: u16> Signed for FiniteFieldValueU8<{ M }> {
+    fn abs(&self) -> Self {
+        self.clone()
     }
 
-    fn infinity() -> Self {
-        unimplemented!()
+    fn abs_sub(&self, other: &Self) -> Self {
+        *self - *other
     }
 
-    fn neg_infinity() -> Self {
-        unimplemented!()
-    }
-
-    fn neg_zero() -> Self {
-        unimplemented!()
-    }
-
-    fn min_value() -> Self {
-        Self::zero()
-    }
-
-    fn min_positive_value() -> Self {
-        Self::zero()
-    }
-
-    fn max_value() -> Self {
-        Self::zero() - Self::one()
-    }
-
-    fn is_nan(self) -> bool {
-        false
-    }
-
-    fn is_infinite(self) -> bool {
-        false
-    }
-
-    fn is_finite(self) -> bool {
-        true
-    }
-
-    fn is_normal(self) -> bool {
-        !self.is_zero()
-    }
-
-    fn classify(self) -> std::num::FpCategory {
-        if self.is_normal() {
-            FpCategory::Normal
-        }
-        else if self.is_zero() {
-            FpCategory::Zero
-        }
-        else {
-            FpCategory::Subnormal
-        }
-    }
-
-    fn floor(self) -> Self {
-        self
-    }
-
-    fn ceil(self) -> Self {
-        self
-    }
-
-    fn round(self) -> Self {
-        self
-    }
-
-    fn trunc(self) -> Self {
-        self
-    }
-
-    fn fract(self) -> Self {
-        Self::zero()
-    }
-
-    fn abs(self) -> Self {
-        self
-    }
-
-    fn signum(self) -> Self {
+    fn signum(&self) -> Self {
         Self::one()
     }
 
-    fn is_sign_positive(self) -> bool {
-        true
+    fn is_positive(&self) -> bool {
+        !Self::is_zero(self)
     }
 
-    fn is_sign_negative(self) -> bool {
+    fn is_negative(&self) -> bool {
         false
-    }
-
-    fn mul_add(self, a: Self, b: Self) -> Self {
-        (self * a) + b
-    }
-
-    fn recip(self) -> Self {
-        unimplemented!()
-    }
-
-    fn powi(self, n: i32) -> Self {
-        let mut acc = Self::one();
-        for _ in 0..n {
-            acc = acc * self;
-        }
-        acc
-    }
-
-    fn powf(self, _n: Self) -> Self {
-        unimplemented!()
-    }
-
-    fn sqrt(self) -> Self {
-        unimplemented!()
-    }
-
-    fn exp(self) -> Self {
-        unimplemented!()
-    }
-
-    fn exp2(self) -> Self {
-        unimplemented!()
-    }
-
-    fn ln(self) -> Self {
-        unimplemented!()
-    }
-
-    fn log(self, _base: Self) -> Self {
-        unimplemented!()
-    }
-
-    fn log2(self) -> Self {
-        unimplemented!()
-    }
-
-    fn log10(self) -> Self {
-        unimplemented!()
-    }
-
-    fn max(self, other: Self) -> Self {
-        if self.value > other.value {
-            self
-        }
-        else {
-            other
-        }
-    }
-
-    fn min(self, other: Self) -> Self {
-        if self.value > other.value {
-            other
-        }
-        else {
-            self
-        }
-    }
-
-    fn abs_sub(self, other: Self) -> Self {
-        self - other
-    }
-
-    fn cbrt(self) -> Self {
-        unimplemented!()
-    }
-
-    fn hypot(self, _other: Self) -> Self {
-        todo!()
-    }
-
-    fn sin(self) -> Self {
-        unimplemented!()
-    }
-
-    fn cos(self) -> Self {
-        unimplemented!()
-    }
-
-    fn tan(self) -> Self {
-        unimplemented!()
-    }
-
-    fn asin(self) -> Self {
-        unimplemented!()
-    }
-
-    fn acos(self) -> Self {
-        unimplemented!()
-    }
-
-    fn atan(self) -> Self {
-        unimplemented!()
-    }
-
-    fn atan2(self, _other: Self) -> Self {
-        unimplemented!()
-    }
-
-    fn sin_cos(self) -> (Self, Self) {
-        unimplemented!()
-    }
-
-    fn exp_m1(self) -> Self {
-        unimplemented!()
-    }
-
-    fn ln_1p(self) -> Self {
-        unimplemented!()
-    }
-
-    fn sinh(self) -> Self {
-        unimplemented!()
-    }
-
-    fn cosh(self) -> Self {
-        unimplemented!()
-    }
-
-    fn tanh(self) -> Self {
-        unimplemented!()
-    }
-
-    fn asinh(self) -> Self {
-        unimplemented!()
-    }
-
-    fn acosh(self) -> Self {
-        unimplemented!()
-    }
-
-    fn atanh(self) -> Self {
-        unimplemented!()
-    }
-
-    fn integer_decode(self) -> (u64, i16, i8) {
-        unimplemented!()
     }
 }
 
-
-impl<const M: u16> ScalarOperand for FiniteFieldValueU8<{ M }> {}
-
-
 impl<const M: u16> AddAssign for FiniteFieldValueU8<{ M }> {
-
     fn add_assign(&mut self, rhs: Self) {
         let result = *self + rhs;
         self.value = result.value;
     }
-
 }
 
-
 impl<const M: u16> Sum for FiniteFieldValueU8<{ M }> {
-
     fn sum<I: Iterator<Item = Self>>(iter: I) -> Self {
         let mut acc = Self::zero();
         for v in iter {
@@ -421,13 +295,187 @@ impl<const M: u16> Sum for FiniteFieldValueU8<{ M }> {
         }
         acc
     }
-
 }
 
+impl<const M: u16> SubAssign for FiniteFieldValueU8<{ M }> {
+    fn sub_assign(&mut self, rhs: Self) {
+        self.value = Self::sub(*self, rhs).value;
+    }
+}
+
+impl<const M: u16> MulAssign for FiniteFieldValueU8<{ M }> {
+    fn mul_assign(&mut self, rhs: Self) {
+        self.value = Self::mul(*self, rhs).value;
+    }
+}
+
+impl<const M: u16> DivAssign for FiniteFieldValueU8<{ M }> {
+    fn div_assign(&mut self, rhs: Self) {
+        self.value = Self::div(*self, rhs).value;
+    }
+}
+
+impl<const M: u16> RemAssign for FiniteFieldValueU8<{ M }> {
+    fn rem_assign(&mut self, rhs: Self) {
+        self.value = Self::rem(*self, rhs).value;
+    }
+}
+
+impl<const M: u16> UpperExp for FiniteFieldValueU8<{ M }> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::UpperExp::fmt(&self.value, f)
+    }
+}
+
+impl<const M: u16> LowerExp for FiniteFieldValueU8<{ M }> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::LowerExp::fmt(&self.value, f)
+    }
+}
+
+impl<const M: u16> FromPrimitive for FiniteFieldValueU8<{ M }> {
+    fn from_i64(n: i64) -> Option<Self> {
+        return Some(Self { value: n as u8 });
+    }
+
+    fn from_u64(n: u64) -> Option<Self> {
+        return Some(Self { value: n as u8 });
+    }
+}
+
+impl<const M: u16> Display for FiniteFieldValueU8<{ M }> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_fmt(format_args!("{:x?}", self.value))
+    }
+}
+
+impl<const M: u16> Product for FiniteFieldValueU8<{ M }> {
+    fn product<I: Iterator<Item = Self>>(iter: I) -> Self {
+        let mut acc = Self::one();
+        for v in iter {
+            acc *= v;
+        }
+        acc
+    }
+}
+
+impl<const M: u16> ScalarOperand for FiniteFieldValueU8<{ M }> {}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_get_most_sig_one() {
+        assert_eq!(most_sig_one(0b0), None);
+        assert_eq!(most_sig_one(0b1), Some(0));
+        assert_eq!(most_sig_one(0b10), Some(1));
+        assert_eq!(most_sig_one(0b101101), Some(5));
+    }
+
+    #[test]
+    fn test_poly_div() {
+        assert_eq!(poly_div(0, 0), Err("Division by zero!".to_string()));
+        assert_eq!(
+            poly_div(0, 1),
+            Ok(DivResult {
+                quotient: 0,
+                remainder: 0
+            })
+        );
+        assert_eq!(
+            poly_div(1, 1),
+            Ok(DivResult {
+                quotient: 1,
+                remainder: 0
+            })
+        );
+        assert_eq!(
+            poly_div(0b11, 1),
+            Ok(DivResult {
+                quotient: 0b11,
+                remainder: 0
+            })
+        );
+        assert_eq!(
+            poly_div(0b11, 0b11),
+            Ok(DivResult {
+                quotient: 1,
+                remainder: 0
+            })
+        );
+        assert_eq!(
+            poly_div(0b11, 0b10),
+            Ok(DivResult {
+                quotient: 1,
+                remainder: 1
+            })
+        );
+        assert_eq!(
+            poly_div(0b101, 0b11),
+            Ok(DivResult {
+                quotient: 0b11,
+                remainder: 0
+            })
+        );
+        assert_eq!(
+            poly_div(0b111, 0b11),
+            Ok(DivResult {
+                quotient: 0b10,
+                remainder: 1
+            })
+        );
+        assert_eq!(
+            poly_div(0b1100011, 0b11),
+            Ok(DivResult {
+                quotient: 0b100001,
+                remainder: 0
+            })
+        );
+        assert_eq!(
+            poly_div(0b1100011, 0b11),
+            Ok(DivResult {
+                quotient: 0b100001,
+                remainder: 0
+            })
+        );
+    }
+
+    #[test]
+    fn test_inverse() {
+        let one = F256Point::one();
+        let two = F256Point { value: 0b10 };
+        let a = F256Point { value: 0b1101 };
+        let b = F256Point { value: 0b11011101 };
+        let c = F256Point { value: 0b11111111 };
+        assert_eq!(one, one * one.inverse().unwrap());
+        assert_eq!(one, two * two.inverse().unwrap());
+        assert_eq!(one, a * a.inverse().unwrap());
+        assert_eq!(one, b * b.inverse().unwrap());
+        assert_eq!(one, c * c.inverse().unwrap());
+    }
+
+    #[test]
+    fn test_div() {
+        fn test_pair<const M: u16>(lhs: FiniteFieldValueU8<M>, rhs: FiniteFieldValueU8<M>) {
+            let result = lhs / rhs;
+            assert_eq!(lhs, rhs * result);
+        }
+
+        let zero = F256Point::zero();
+        let one = F256Point::one();
+        let two = F256Point { value: 0b10 };
+        let a = F256Point { value: 0b1101 };
+        let b = F256Point { value: 0b11011101 };
+        let c = F256Point { value: 0b11111111 };
+
+        test_pair(zero, two);
+        test_pair(one, two);
+        test_pair(two, one);
+        test_pair(c, b);
+        test_pair(c, a);
+        test_pair(c, c);
+    }
 
     #[test]
     fn test_add() {
