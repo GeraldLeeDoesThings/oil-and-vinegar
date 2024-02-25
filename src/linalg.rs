@@ -1,4 +1,4 @@
-use ndarray::{concatenate, s, Array1, ArrayView1, ArrayView2, Axis};
+use ndarray::{concatenate, s, Array1, Array2, ArrayView1, ArrayView2, Axis};
 use num_traits::{abs, One, Signed, Zero};
 use std::{
     cmp::min,
@@ -136,11 +136,42 @@ pub fn solve<
     }
 }
 
+pub fn upper_triangular<T: Add + Clone + Copy + Zero>(
+    matrix: &Array2<T>,
+) -> Result<Array2<T>, String> {
+    let dim = matrix.dim();
+    if !matrix.is_square() {
+        return Err(format!(
+            "Non-square matrix passed to 'upper' with dimensions {} x {}.",
+            dim.0, dim.1
+        ));
+    }
+
+    // A^T = -A
+    // (M' - M)^T = M - M'
+    // M' = M - (M' - M)^T
+    // M' = M - (M'^T - M^T)
+    // M' = M - M'^T + M^T
+    // M' + M'^T = M + M^T
+    let mut result: Array2<T> = Array2::zeros(dim);
+
+    for row in 0..(dim.0) {
+        for col in row..(dim.0) {
+            if row == col {
+                result[[row, col]] = matrix[[row, col]];
+            } else {
+                result[[row, col]] = matrix[[row, col]] + matrix[[col, row]];
+            }
+        }
+    }
+
+    return Ok(result);
+}
+
 #[cfg(test)]
 mod tests {
-    use ndarray::Array2;
-
     use super::*;
+    use ndarray::Array2;
 
     #[test]
     fn test_determinant_simple_success() {
@@ -176,5 +207,17 @@ mod tests {
         let y: Array1<f32> = Array1::from_iter(vec![9f32, 8f32, 3f32]);
         let x = solve(&a.view(), &y.view()).unwrap();
         assert!(a.dot(&x).abs_diff_eq(&y, 1e-6));
+    }
+
+    #[test]
+    fn test_upper_triangular_success() {
+        let sample = Array2::from_shape_vec((3, 3), (1..10).collect()).unwrap();
+        let sample_prime = upper_triangular(&sample).unwrap();
+        let subtracted = sample - sample_prime;
+        let should_be_zero = subtracted.clone().reversed_axes() + subtracted;
+
+        let is_all_zero = should_be_zero.mapv(|v| v == 0).fold(true, |n, s| n && *s);
+
+        assert!(is_all_zero);
     }
 }

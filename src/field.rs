@@ -28,6 +28,12 @@ pub struct FiniteFieldValueU8<const F: u16> {
     value: u8,
 }
 
+impl<const M: u16> FiniteFieldValueU8<{ M }> {
+    pub fn to_byte(&self) -> u8 {
+        self.value
+    }
+}
+
 impl<const M: u16> Debug for FiniteFieldValueU8<{ M }> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.serialize_u8(self.value)

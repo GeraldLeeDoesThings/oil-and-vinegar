@@ -3,5 +3,9 @@
 
 pub mod field;
 pub mod key;
-pub mod solve;
-pub mod utils;
+pub mod linalg;
+
+pub mod hazmat {
+    pub mod expand;
+    pub mod hash;
+}

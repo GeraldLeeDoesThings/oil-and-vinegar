@@ -1,10 +1,13 @@
 use crate::{
+    hazmat::expand::{expand_p, expand_sk, expand_v},
     field::{F256Point, F256},
-    solve::solve,
-    utils::{expand_v, hash_concat, upper_triangular},
+    hazmat::hash::hash_concat,
+    linalg::{solve, upper_triangular},
 };
 use ndarray::{concatenate, s, stack, Array1, Array2, Array3, ArrayView1, ArrayView2};
 use rand::{rngs::OsRng, RngCore};
+use std::error::Error;
+use std::io::{Read, Write};
 use std::iter::zip;
 
 pub const PK_SEED_LEN: usize = 128;
@@ -15,19 +18,33 @@ pub const PK_SEED_BYTES: usize = PK_SEED_LEN / 8;
 pub const SK_SEED_BYTES: usize = SK_SEED_LEN / 8;
 pub const SALT_LEN_BYTES: usize = SALT_LEN / 8;
 
+/* uov-Ip */
+pub const N_I: usize = 112;
+pub const M_I: usize = 44;
+
+/* uov-III */
+pub const N_III: usize = 184;
+pub const M_III: usize = 72;
+
+/* uov-V */
+pub const N_V: usize = 244;
+pub const M_V: usize = 96;
+
+#[derive(PartialEq)]
 pub struct PublicKey {
-    p_matrix: Array3<F256Point>,
     n: usize,
     m: usize,
+    p_matrix: Array3<F256Point>,
 }
 
+#[derive(PartialEq)]
 pub struct PrivateKey {
+    n: usize,
+    m: usize,
     seed: [u8; SK_SEED_BYTES],
     o_matrix: Array2<F256Point>,
     p_matrix_1: Array3<F256Point>,
     s_matrix: Array3<F256Point>,
-    n: usize,
-    m: usize,
 }
 
 impl PublicKey {
@@ -85,7 +102,9 @@ impl PublicKey {
             p = ndarray::concatenate(ndarray::Axis(0), &[p.view(), pslice.view()]).unwrap();
         }
 
-        return Ok(PublicKey { p_matrix: p, n, m });
+        // TODO: Additional validation
+
+        return Ok(PublicKey { n, m, p_matrix: p });
     }
 
     pub fn from_elems(elems: Vec<F256Point>, n: usize, m: usize) -> Result<Self, String> {
@@ -121,7 +140,9 @@ impl PublicKey {
             }
         }
 
-        return Ok(PublicKey { p_matrix: p, n, m });
+        // TODO: Additional validation
+
+        return Ok(PublicKey { n, m, p_matrix: p });
     }
 
     pub fn from_bytes(bytes: Vec<u8>, n: usize, m: usize) -> Result<Self, String> {
@@ -150,10 +171,12 @@ impl PublicKey {
             return Err(format!("First dimension of matrix P must be smaller than the other two! Found {} which is >= to {}", m, n));
         }
 
+        // TODO: Additional validation
+
         Ok(PublicKey {
-            p_matrix,
             n: n,
             m: m,
+            p_matrix,
         })
     }
 
@@ -189,6 +212,32 @@ impl PublicKey {
         let sigvec: Array1<F256Point> =
             Array1::from_iter((0..self.m).map(|i| signature.t().dot(&self.p(i).dot(signature))));
         t == sigvec
+    }
+
+    pub fn save(&self, file: &mut impl Write) -> Result<(), std::io::Error> {
+        file.write_all(&(self.n as u64).to_le_bytes())?;
+        file.write_all(&(self.m as u64).to_le_bytes())?;
+        let p_bytes: Vec<u8> = self.p_matrix.map(|v| v.to_byte()).into_iter().collect();
+        file.write_all(&p_bytes)?;
+        Ok(())
+    }
+
+    pub fn load(file: &mut impl Read) -> Result<PublicKey, Box<dyn Error>> {
+        let mut meta_buf = [0u8; 8];
+        file.read_exact(&mut meta_buf)?;
+        let n: usize = u64::from_le_bytes(meta_buf) as usize;
+
+        file.read_exact(&mut meta_buf)?;
+        let m: usize = u64::from_le_bytes(meta_buf) as usize;
+
+        let mut p_buf: Vec<u8> = Vec::new();
+        file.read_to_end(&mut p_buf)?;
+
+        let p_elems: Vec<F256Point> = p_buf.iter().map(|b| F256.make_point(*b)).collect();
+
+        let p: Array3<F256Point> = Array3::from_shape_vec((m, n, n), p_elems)?;
+
+        Ok(PublicKey { n, m, p_matrix: p })
     }
 }
 
@@ -229,13 +278,15 @@ impl PrivateKey {
             ));
         }
 
+        // TODO: Additional validation
+
         Ok(PrivateKey {
+            n,
+            m,
             seed,
             o_matrix,
             p_matrix_1,
             s_matrix,
-            n,
-            m,
         })
     }
 
@@ -280,25 +331,124 @@ impl PrivateKey {
         }
         return None;
     }
+
+    pub fn save(&self, file: &mut impl Write) -> Result<(), std::io::Error> {
+        file.write_all(&(self.n as u64).to_le_bytes())?;
+        file.write_all(&(self.m as u64).to_le_bytes())?;
+        file.write_all(&self.seed)?;
+        let o_bytes: Vec<u8> = self.o_matrix.map(|v| v.to_byte()).into_iter().collect();
+        file.write_all(&o_bytes)?;
+        let p_bytes: Vec<u8> = self.p_matrix_1.map(|v| v.to_byte()).into_iter().collect();
+        file.write_all(&p_bytes)?;
+        let s_bytes: Vec<u8> = self.s_matrix.map(|v| v.to_byte()).into_iter().collect();
+        file.write_all(&s_bytes)?;
+        Ok(())
+    }
+
+    pub fn load(file: &mut impl Read) -> Result<PrivateKey, Box<dyn Error>> {
+        let mut meta_buf = [0u8; 8];
+        file.read_exact(&mut meta_buf)?;
+        let n: usize = u64::from_le_bytes(meta_buf) as usize;
+
+        file.read_exact(&mut meta_buf)?;
+        let m: usize = u64::from_le_bytes(meta_buf) as usize;
+
+        let mut seed = [0u8; SK_SEED_BYTES];
+        file.read_exact(&mut seed)?;
+
+        let mut mat_buf: Vec<u8> = Vec::new();
+        file.read_to_end(&mut mat_buf)?;
+
+        let mut last_index: usize = (n - m) * m;
+        let o_buf = &mat_buf[0..((n - m) * m)];
+
+        let p_buf = &mat_buf[last_index..(last_index + m * (n - m) * (n - m))];
+        last_index += m * (n - m) * (n - m);
+
+        let s_buf = &mat_buf[last_index..(last_index + m * (n - m) * m)];
+
+        let o_elems: Vec<F256Point> = o_buf.iter().map(|b| F256.make_point(*b)).collect();
+        let p_elems: Vec<F256Point> = p_buf.iter().map(|b| F256.make_point(*b)).collect();
+        let s_elems: Vec<F256Point> = s_buf.iter().map(|b| F256.make_point(*b)).collect();
+
+        let o: Array2<F256Point> = Array2::from_shape_vec((n - m, m), o_elems)?;
+        let p: Array3<F256Point> = Array3::from_shape_vec((m, n - m, n - m), p_elems)?;
+        let s: Array3<F256Point> = Array3::from_shape_vec((m, n - m, m), s_elems)?;
+
+        Ok(PrivateKey { n, m, seed, o_matrix: o, p_matrix_1: p, s_matrix: s })
+    }
+}
+
+pub fn key_gen_seeded(
+    seed_sk: [u8; SK_SEED_BYTES],
+    seed_pk: [u8; PK_SEED_BYTES],
+    n: usize,
+    m: usize,
+) -> Result<(PrivateKey, PublicKey), String> {
+    let o = expand_sk(&seed_sk, n, m);
+    let pmats = expand_p(&seed_pk, n, m);
+    let mut p: Array3<F256Point> = Array3::zeros((0, n, n));
+    let mut smats: Vec<Array2<F256Point>> = Vec::new();
+
+    for (p1, p2) in zip(pmats.0.outer_iter(), pmats.1.outer_iter()) {
+        let ot = o.t();
+        let p3 = upper_triangular(&(&ot.dot(&p1).dot(&o) - &ot.dot(&p2))).unwrap();
+        let ptop = ndarray::concatenate(ndarray::Axis(1), &[p1, p2]);
+        let pbot = ndarray::concatenate(
+            ndarray::Axis(1),
+            &[Array2::zeros((m, n - m)).view(), p3.view()],
+        );
+        let pslice = ndarray::concatenate(
+            ndarray::Axis(0),
+            &[ptop.unwrap().view(), pbot.unwrap().view()],
+        )
+        .unwrap()
+        .insert_axis(ndarray::Axis(0));
+        p = ndarray::concatenate(ndarray::Axis(0), &[p.view(), pslice.view()]).unwrap();
+        smats.push(&(&p1 + &p1.t()).dot(&o) + &p2);
+    }
+
+    let smat_views: Vec<ArrayView2<F256Point>> = smats.iter().map(|mat| mat.view()).collect();
+    let s: Array3<F256Point> = stack(ndarray::Axis(0), &smat_views).unwrap();
+
+    let esk = match PrivateKey::from_components(seed_sk, o, pmats.0, s, n, m) {
+        Ok(k) => k,
+        Err(err) => return Err("Error creating private key: \n".to_owned() + &err),
+    };
+
+    let epk = match PublicKey::from_p(p) {
+        Ok(k) => k,
+        Err(err) => return Err("Error creating public key: \n".to_owned() + &err),
+    };
+
+    Ok((esk, epk))
+}
+
+pub fn key_gen(n: usize, m: usize) -> Result<(PrivateKey, PublicKey), String> {
+    let mut seed_sk = [0u8; SK_SEED_BYTES];
+    let mut seed_pk = [0u8; PK_SEED_BYTES];
+    OsRng.fill_bytes(&mut seed_sk);
+    OsRng.fill_bytes(&mut seed_pk);
+    return key_gen_seeded(seed_sk, seed_pk, n, m);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::utils::{expand_p, expand_sk, key_gen};
+    use std::io::Cursor;
 
     #[test]
     fn test_public_key_from_components() {
         let seed_sk: [u8; SK_SEED_BYTES] = [0u8; SK_SEED_BYTES];
         let seed_pk: [u8; PK_SEED_BYTES] = [0u8; PK_SEED_BYTES];
 
-        let o = expand_sk(&seed_sk, 112, 44);
+        let o = expand_sk(&seed_sk, N_I, M_I);
         let ot = o.t();
-        let pmats = expand_p(&seed_pk, 112, 44);
-        let pk = PublicKey::from_components(&pmats.0, &pmats.1, &o, 112, 44).unwrap();
+        let pmats = expand_p(&seed_pk, N_I, M_I);
+        let pk = PublicKey::from_components(&pmats.0, &pmats.1, &o, N_I, M_I).unwrap();
 
         for _round in 0..2 {
-            for i in 0..44 {
+            for i in 0..M_I {
                 let p1 = pk.p1(i);
                 let p2 = pk.p2(i);
 
@@ -317,17 +467,16 @@ mod tests {
         let seed_sk: [u8; SK_SEED_BYTES] = [0u8; SK_SEED_BYTES];
         let seed_pk: [u8; PK_SEED_BYTES] = [0u8; PK_SEED_BYTES];
 
-        let o: Array2<F256Point> = expand_sk(&seed_sk, 112, 44);
+        let o: Array2<F256Point> = expand_sk(&seed_sk, N_I, M_I);
         let ot = o.t();
-        let pmats = expand_p(&seed_pk, 112, 44);
-        // let pk = PublicKey::<112, 44>::from_components(&pmats.0, &pmats.1, &o).unwrap();
+        let pmats = expand_p(&seed_pk, N_I, M_I);
 
         let mut p1_vec: Vec<ArrayView2<F256Point>> = Vec::new();
         let mut p2_vec: Vec<ArrayView2<F256Point>> = Vec::new();
         let mut p3_vec: Vec<Array2<F256Point>> = Vec::new();
         let mut elem_vec: Vec<F256Point> = Vec::new();
 
-        for i in 0..44 {
+        for i in 0..M_I {
             let p1 = pmats.0.index_axis(ndarray::Axis(0), i);
             let p2 = pmats.1.index_axis(ndarray::Axis(0), i);
             let p3 = upper_triangular(&(&ot.dot(&p1).dot(&o) - &ot.dot(&p2))).unwrap();
@@ -337,34 +486,34 @@ mod tests {
             p3_vec.push(p3);
         }
 
-        for row in 0..(112 - 44) {
-            for col in row..(112 - 44) {
-                for i in 0..44 {
+        for row in 0..(N_I - M_I) {
+            for col in row..(N_I - M_I) {
+                for i in 0..M_I {
                     elem_vec.push(p1_vec.get(i).unwrap()[[row, col]]);
                 }
             }
         }
 
-        for row in 0..(112 - 44) {
-            for col in 0..44 {
-                for i in 0..44 {
+        for row in 0..(N_I - M_I) {
+            for col in 0..M_I {
+                for i in 0..M_I {
                     elem_vec.push(p2_vec.get(i).unwrap()[[row, col]]);
                 }
             }
         }
 
-        for row in 0..44 {
-            for col in row..44 {
-                for i in 0..44 {
+        for row in 0..M_I {
+            for col in row..M_I {
+                for i in 0..M_I {
                     elem_vec.push(p3_vec.get(i).unwrap()[[row, col]]);
                 }
             }
         }
 
-        let pk = PublicKey::from_elems(elem_vec, 112, 44).unwrap();
+        let pk = PublicKey::from_elems(elem_vec, N_I, M_I).unwrap();
 
         for _round in 0..2 {
-            for i in 0..44 {
+            for i in 0..M_I {
                 let p1 = p1_vec.get(i).unwrap();
                 let p2 = p2_vec.get(i).unwrap();
                 let p3 = p3_vec.get(i).unwrap();
@@ -378,10 +527,61 @@ mod tests {
 
     #[test]
     fn test_sign_verify() {
-        let (sk, pk) = key_gen([0u8; SK_SEED_BYTES], [0u8; PK_SEED_BYTES], 112, 44).unwrap();
+        let (sk, pk) = key_gen_seeded([0u8; SK_SEED_BYTES], [0u8; PK_SEED_BYTES], N_I, M_I).unwrap();
         let (mut sig, salt) = sk.sign(&[0u8; 64]).unwrap();
         assert!(pk.verify(&[0u8; 64], &sig.view(), &salt));
         sig[[12]] += F256.make_point(1);
         assert!(!pk.verify(&[0u8; 64], &sig.view(), &salt));
+    }
+
+    #[test]
+    fn test_key_gen_seeded() {
+        use hex::decode;
+        let raw_seed = decode("061550234D158C5EC95595FE04EF7A25767F2E24CC2BC479D09D86DC9ABCFDE7056A8C266F9EF97ED08541DBD2E1FFA1").unwrap();
+        let mut seed_sk: [u8; SK_SEED_BYTES] = [0u8; SK_SEED_BYTES];
+        let mut seed_pk: [u8; PK_SEED_BYTES] = [0u8; PK_SEED_BYTES];
+        let mut i: usize = 0;
+        for b in &raw_seed[0..SK_SEED_BYTES] {
+            seed_sk[i] = *b;
+            i += 1;
+        }
+        i = 0;
+        for b in &raw_seed[SK_SEED_BYTES..] {
+            seed_pk[i] = *b;
+            i += 1;
+        }
+        let pmats = expand_p(&seed_pk, N_I, M_I);
+        let o = expand_sk(&seed_sk, N_I, M_I);
+        let (_esk, epk) = key_gen_seeded(seed_sk, seed_pk, N_I, M_I).unwrap();
+        for i in 0..M_I {
+            let p1 = pmats.0.index_axis(ndarray::Axis(0), i);
+            let p2 = pmats.1.index_axis(ndarray::Axis(0), i);
+            let p3 = upper_triangular(&(&o.t().dot(&p1.dot(&o)) - &o.t().dot(&p2))).unwrap();
+            assert_eq!(p1, epk.p1(i));
+            assert_eq!(p2, epk.p2(i));
+            assert_eq!(p3, epk.p3(i));
+        }
+    }
+
+    #[test]
+    fn test_public_key_serialize() {
+        let (_esk, epk) = key_gen(N_I, M_I).unwrap();
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut cursor = Cursor::new(&mut buffer);
+        epk.save(&mut cursor).unwrap();
+        cursor.set_position(0);
+        let restored = PublicKey::load(&mut cursor).unwrap();
+        assert!(epk == restored);
+    }
+
+    #[test]
+    fn test_private_key_serialize() {
+        let (esk, _epk) = key_gen(N_I, M_I).unwrap();
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut cursor = Cursor::new(&mut buffer);
+        esk.save(&mut cursor).unwrap();
+        cursor.set_position(0);
+        let restored = PrivateKey::load(&mut cursor).unwrap();
+        assert!(esk == restored);
     }
 }
